@@ -46,6 +46,10 @@ async def ask(
         msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
         raise AIError(msg[:300])
     try:
-        return data["choices"][0]["message"]["content"]
+        msg = data["choices"][0]["message"]
     except (KeyError, IndexError, TypeError):
         raise AIError(f"Неожиданный ответ OpenRouter: {str(data)[:200]}")
+    content = msg.get("content") or msg.get("reasoning") or ""
+    if not str(content).strip():
+        raise AIError("Модель вернула пустой ответ — попробуй ещё раз или /model")
+    return str(content)

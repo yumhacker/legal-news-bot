@@ -11,7 +11,7 @@ async def main() -> None:
                 [{"role": "user", "content": "Ответь одним словом: работаю"}],
                 key,
                 online=False,
-                max_tokens=20,
+                max_tokens=300,
             )
             print(f"{key}: OK | {out.strip()[:40]}")
         except Exception as exc:  # noqa: BLE001

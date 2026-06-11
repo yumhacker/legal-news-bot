@@ -1,0 +1,15 @@
+[Unit]
+Description=Legal News Bot (MVD Israel + Knesset monitor)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/legal_news_bot
+ExecStart=/opt/legal_news_bot/venv/bin/python /opt/legal_news_bot/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

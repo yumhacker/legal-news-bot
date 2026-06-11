@@ -9,7 +9,6 @@ async def main() -> None:
         ("news", sources.fetch_news),
         ("procedures", sources.fetch_procedures),
         ("laws", sources.fetch_laws),
-        ("court", sources.fetch_court_decisions),
     ]
     for name, fn in checks:
         try:

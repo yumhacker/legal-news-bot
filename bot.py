@@ -40,7 +40,8 @@ SOURCES = {
     "news": ("🗞 Новости МВД", sources.fetch_news),
     "procedures": ("📋 Процедуры МВД (נהלים)", sources.fetch_procedures),
     "laws": ("⚖️ Принятые законы Кнессета", sources.fetch_laws),
-    "court": ("👨‍⚖️ Решения судов (пресс-служба)", sources.fetch_court_decisions),
+    # «Решения судов» (spokmanship_court): www.gov.il блокирует серверные IP
+    # даже через прокси — источник отключён до решения проблемы доступа.
 }
 
 LAWYER_SYSTEM = (

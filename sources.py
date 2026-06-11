@@ -113,20 +113,19 @@ def _parse_gateway_item(x: dict) -> dict:
 async def _fetch_procedures_gateway(limit: int) -> list[dict]:
     """Основной путь: процедуры через шлюз openapi-gc
     (www.gov.il блокирует серверные IP, шлюз с Referer — нет)."""
-    params = {
-        "CollectorType": "policies",
-        "officeId": OFFICE_ID,
-        "Type": POLICY_TYPE,
-        "culture": "he",
-        "skip": "0",
-    }
+    # имена параметров подсмотрены в запросах самой страницы policies:
+    # CollectorType=policy&CollectorType=pmopolicy (именно так, не policies)
+    params = [
+        ("CollectorType", "policy"),
+        ("CollectorType", "pmopolicy"),
+        ("officeId", OFFICE_ID),
+        ("Type", POLICY_TYPE),
+        ("culture", "he"),
+        ("skip", "0"),
+        ("limit", str(max(limit, 10))),
+    ]
     data = await _get_json(NEWS_URL, params=params, headers=GW_HEADERS)
     results = data.get("results") or []
-    if not results:
-        # шлюз понимает фильтр Type иначе — берём все документы раздела
-        params.pop("Type")
-        data = await _get_json(NEWS_URL, params=params, headers=GW_HEADERS)
-        results = data.get("results") or []
     return [_parse_gateway_item(x) for x in results[:limit]]
 
 

@@ -16,6 +16,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BotCommand,
+    BotCommandScopeDefault,
     CallbackQuery,
     ChatMemberUpdated,
     InlineKeyboardButton,
@@ -94,6 +96,9 @@ def main_kb() -> InlineKeyboardMarkup:
     rows.append(
         [InlineKeyboardButton(text="🔄 Проверить все источники", callback_data="src:all")]
     )
+    rows.append(
+        [InlineKeyboardButton(text="🤖 Спросить помощника", callback_data="ai:hint")]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -139,12 +144,18 @@ async def cmd_denychat(message: Message) -> None:
 
 @main_router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
+    hint = (
+        "\n\n💬 А ещё я помощник: просто напиши мне сообщение "
+        "(вопрос, текст новости, «набросай пост…») — отвечу без команд."
+        if message.chat.type == "private"
+        else "\n\n💬 Помощник в группе: /ai, /post, /idea."
+    )
     await message.answer(
         "Шалом! Я слежу за обновлениями для юридической практики:\n"
         "• новости МВД (רשות האוכלוסין וההגירה)\n"
         "• процедуры МВД (נהלים)\n"
         "• принятые законы Кнессета\n\n"
-        "Нажми кнопку — пришлю последние 5 со ссылками.",
+        "Нажми кнопку — пришлю последние 5 со ссылками." + hint,
         reply_markup=main_kb(),
     )
 
@@ -382,6 +393,30 @@ async def cmd_model(message: Message) -> None:
         reply_markup=_model_kb(message.chat.id),
     )
 
+@main_router.callback_query(F.data == "ai:hint")
+async def on_ai_hint(cb: CallbackQuery) -> None:
+    await cb.answer()
+    is_private = cb.message.chat.type == "private"
+    if is_private:
+        tip = (
+            "🤖 Просто напиши мне сообщение — и я отвечу как помощник.\n"
+            "Не нужны команды: спрашивай про статус, законы, переводи с иврита, "
+            "проси набросать пост или идеи.\n\n"
+        )
+    else:
+        tip = (
+            "🤖 В группе помощник вызывается командами:\n"
+        )
+    await cb.message.answer(
+        tip
+        + "Полезные команды:\n"
+        "• <code>/post</code> — ответь этим на новость → готовый пост\n"
+        "• <code>/idea тема</code> — идеи постов и видео\n"
+        "• <code>/ai вопрос</code> — задать вопрос\n"
+        "• <code>/model</code> — выбрать Claude/GPT и включить 🌐 интернет-поиск"
+    )
+
+
 @main_router.callback_query(F.data.startswith("mdl:"))
 async def on_model_button(cb: CallbackQuery) -> None:
     chat_id = cb.message.chat.id
@@ -396,6 +431,14 @@ async def on_model_button(cb: CallbackQuery) -> None:
     except Exception:  # noqa: BLE001
         pass
     await cb.answer("Сохранено")
+
+
+# ===== Обычный текст в личке = разговор с помощником (без команд) =====
+# Должен идти ПОСЛЕ всех команд, чтобы не перехватывать их.
+
+@main_router.message(F.chat.type == "private", F.text & ~F.text.startswith("/"))
+async def on_plain_text(message: Message) -> None:
+    await _run_ai(message, message.text.strip(), use_style=False)
 
 
 # ============================ Чужим — отказ ============================
@@ -493,6 +536,22 @@ async def main() -> None:
         config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    # Синяя кнопка «Меню» рядом с полем ввода
+    try:
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="Меню и последние обновления"),
+                BotCommand(command="ai", description="Спросить помощника"),
+                BotCommand(command="post", description="Сделать пост (ответом на новость)"),
+                BotCommand(command="idea", description="Идеи постов и видео"),
+                BotCommand(command="model", description="Выбрать модель и интернет"),
+                BotCommand(command="style_add", description="Добавить пример стиля Далера"),
+                BotCommand(command="help", description="Все команды"),
+            ],
+            scope=BotCommandScopeDefault(),
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("Не удалось задать меню команд")
     dp = Dispatcher()
     dp.include_router(admin_router)
     dp.include_router(main_router)

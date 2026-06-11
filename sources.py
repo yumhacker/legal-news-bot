@@ -15,6 +15,13 @@ POLICY_TYPE = "2efa9b53-5df9-4df9-8e9d-21134511f368"
 # Публичный ключ фронтенда gov.il (зашит в код сайта; без него API отвечает 500)
 GOVIL_CLIENT_ID = "9KFgciHHGDyNiqz5MdQS0eK2ApeJYMc6YnElUICpN1atirZc"
 
+# Шлюз openapi-gc требует Referer с gov.il, иначе тихо отдаёт 500/пустоту
+GW_HEADERS = {
+    "x-client-id": GOVIL_CLIENT_ID,
+    "Referer": "https://www.gov.il/",
+    "Origin": "https://www.gov.il",
+}
+
 NEWS_URL = (
     "https://openapi-gc.digital.gov.il/pub/cio/govil/rest/"
     "collectors/v1/api/DataCollector/GetResults"
@@ -57,7 +64,7 @@ async def fetch_news(limit: int = 5) -> list[dict]:
             "culture": "he",
             "skip": "0",
         },
-        headers={"x-client-id": GOVIL_CLIENT_ID},
+        headers=GW_HEADERS,
     )
     out = []
     for x in (data.get("results") or [])[:limit]:
@@ -104,8 +111,8 @@ def _parse_gateway_item(x: dict) -> dict:
 
 
 async def _fetch_procedures_gateway(limit: int) -> list[dict]:
-    """Запасной путь: процедуры через шлюз openapi-gc (www.gov.il может
-    отдавать 403 с серверных IP, шлюз — нет)."""
+    """Основной путь: процедуры через шлюз openapi-gc
+    (www.gov.il блокирует серверные IP, шлюз с Referer — нет)."""
     data = await _get_json(
         NEWS_URL,
         params={
@@ -115,27 +122,29 @@ async def _fetch_procedures_gateway(limit: int) -> list[dict]:
             "culture": "he",
             "skip": "0",
         },
-        headers={"x-client-id": GOVIL_CLIENT_ID},
+        headers=GW_HEADERS,
     )
     return [_parse_gateway_item(x) for x in (data.get("results") or [])[:limit]]
 
 
 async def fetch_procedures(limit: int = 5) -> list[dict]:
-    """Процедуры МВД (נהלים והנחיות), отсортированы по дате обновления."""
+    """Процедуры МВД (נהלים והנחיות), отсортированы по дате обновления.
+
+    Сначала шлюз openapi-gc (работает с серверов), при сбое — прямой
+    PolicyApi (работает из браузеров/локально)."""
     try:
-        data = await _get_json(
-            POLICY_URL,
-            params={
-                "OfficeId": OFFICE_ID,
-                "Type": POLICY_TYPE,
-                "limit": str(limit),
-                "skip": "0",
-            },
-        )
-    except aiohttp.ClientResponseError as exc:
-        if exc.status in (403, 429, 503):
-            return await _fetch_procedures_gateway(limit)
-        raise
+        return await _fetch_procedures_gateway(limit)
+    except Exception:  # noqa: BLE001 — пробуем прямой API
+        pass
+    data = await _get_json(
+        POLICY_URL,
+        params={
+            "OfficeId": OFFICE_ID,
+            "Type": POLICY_TYPE,
+            "limit": str(limit),
+            "skip": "0",
+        },
+    )
     out = []
     for x in (data.get("results") or [])[:limit]:
         updated = x.get("DocUpdateDate") or x.get("DocPublishedDate") or ""

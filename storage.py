@@ -27,6 +27,12 @@ def init() -> None:
         "id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, "
         "added TEXT DEFAULT CURRENT_TIMESTAMP)"
     )
+    _conn.execute(
+        "CREATE TABLE IF NOT EXISTS history ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, "
+        "role TEXT NOT NULL, content TEXT NOT NULL, "
+        "ts TEXT DEFAULT CURRENT_TIMESTAMP)"
+    )
     _conn.commit()
 
 
@@ -120,4 +126,43 @@ def style_count() -> int:
 
 def clear_style() -> None:
     _conn.execute("DELETE FROM style")
+    _conn.commit()
+
+
+# --- Память диалога ---
+
+def add_history(chat_id: int, role: str, content: str) -> None:
+    _conn.execute(
+        "INSERT INTO history (chat_id, role, content) VALUES (?, ?, ?)",
+        (chat_id, role, content),
+    )
+    # держим не больше 40 последних реплик на чат
+    _conn.execute(
+        "DELETE FROM history WHERE chat_id = ? AND id NOT IN "
+        "(SELECT id FROM history WHERE chat_id = ? ORDER BY id DESC LIMIT 40)",
+        (chat_id, chat_id),
+    )
+    _conn.commit()
+
+
+def get_history(chat_id: int, max_msgs: int = 16, max_chars: int = 8000) -> list[dict]:
+    """Последние реплики диалога в формате [{role, content}], старые→новые."""
+    rows = _conn.execute(
+        "SELECT role, content FROM history WHERE chat_id = ? "
+        "ORDER BY id DESC LIMIT ?",
+        (chat_id, max_msgs),
+    ).fetchall()
+    out: list[dict] = []
+    total = 0
+    for role, content in rows:  # идём от новых к старым
+        if total + len(content) > max_chars:
+            break
+        out.append({"role": role, "content": content})
+        total += len(content)
+    out.reverse()
+    return out
+
+
+def clear_history(chat_id: int) -> None:
+    _conn.execute("DELETE FROM history WHERE chat_id = ?", (chat_id,))
     _conn.commit()

@@ -179,7 +179,8 @@ async def cmd_help(message: Message) -> None:
         "/post — ответь этим на новость → готовый пост; "
         "<code>/post для инстаграма</code>\n"
         "/idea тема — идеи постов и видео\n"
-        "/model — выбрать Claude/GPT и включить интернет-поиск\n\n"
+        "/model — выбрать Claude/GPT и включить интернет-поиск\n"
+        "/reset — забыть текущий диалог (бот помнит контекст беседы)\n\n"
         "✍️ Стиль Далера:\n"
         "/style_add — добавить пример текста (ответом или после команды)\n"
         "/style — что сохранено · /style_clear — очистить (админ)\n\n"
@@ -257,15 +258,15 @@ async def _run_ai(message: Message, user_prompt: str, use_style: bool) -> None:
         model_key = ai.DEFAULT_MODEL_KEY
     online = storage.get_setting(chat_id, "web", "0") == "1"
     system = LAWYER_SYSTEM + (_style_block() if use_style else "")
+    history = storage.get_history(chat_id)
     note = await message.answer(
         f"⏳ {ai.MODELS[model_key][0]}{' 🌐' if online else ''} думает…"
     )
     try:
         text = await ai.ask(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_prompt},
-            ],
+            [{"role": "system", "content": system}]
+            + history
+            + [{"role": "user", "content": user_prompt}],
             model_key,
             online,
         )
@@ -273,6 +274,9 @@ async def _run_ai(message: Message, user_prompt: str, use_style: bool) -> None:
         log.exception("Ошибка ИИ")
         await note.edit_text(f"⚠️ Ошибка ИИ: {exc}")
         return
+    # запоминаем обмен, чтобы бот помнил о чём речь
+    storage.add_history(chat_id, "user", user_prompt)
+    storage.add_history(chat_id, "assistant", text)
     try:
         await note.delete()
     except Exception:  # noqa: BLE001
@@ -384,6 +388,14 @@ async def cmd_style_clear(message: Message) -> None:
         return
     storage.clear_style()
     await message.answer("Стиль очищен.")
+
+
+@main_router.message(Command("reset"))
+async def cmd_reset(message: Message) -> None:
+    storage.clear_history(message.chat.id)
+    await message.answer(
+        "🧹 Память диалога очищена — начнём тему с чистого листа."
+    )
 
 def _model_kb(chat_id: int) -> InlineKeyboardMarkup:
     current = storage.get_setting(chat_id, "model", ai.DEFAULT_MODEL_KEY)
@@ -615,6 +627,7 @@ async def main() -> None:
                 BotCommand(command="idea", description="Идеи постов и видео"),
                 BotCommand(command="model", description="Выбрать модель и интернет"),
                 BotCommand(command="style_add", description="Добавить пример стиля Далера"),
+                BotCommand(command="reset", description="Забыть текущий диалог"),
                 BotCommand(command="help", description="Все команды"),
             ],
             scope=BotCommandScopeDefault(),

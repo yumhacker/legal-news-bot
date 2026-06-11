@@ -205,7 +205,12 @@ async def main() -> None:
     dp.include_router(main_router)
     dp.include_router(denied_router)
     log.info("Бот запущен. Доступ: %s", sorted(config.ALLOWED_USER_IDS))
-    await asyncio.gather(dp.start_polling(bot), watcher(bot))
+    watcher_task = asyncio.create_task(watcher(bot))
+    try:
+        await dp.start_polling(bot)
+    finally:
+        # без этого процесс не завершается по SIGTERM и systemd ждёт 90 сек
+        watcher_task.cancel()
 
 
 if __name__ == "__main__":

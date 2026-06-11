@@ -10,6 +10,7 @@ WorkingDirectory=/opt/legal_news_bot
 ExecStart=/opt/legal_news_bot/venv/bin/python /opt/legal_news_bot/bot.py
 Restart=always
 RestartSec=10
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target

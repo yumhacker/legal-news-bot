@@ -17,6 +17,16 @@ def init() -> None:
     _conn.execute(
         "CREATE TABLE IF NOT EXISTS allowed_chats (chat_id INTEGER PRIMARY KEY)"
     )
+    _conn.execute(
+        "CREATE TABLE IF NOT EXISTS settings ("
+        "chat_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT, "
+        "PRIMARY KEY (chat_id, key))"
+    )
+    _conn.execute(
+        "CREATE TABLE IF NOT EXISTS style ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, "
+        "added TEXT DEFAULT CURRENT_TIMESTAMP)"
+    )
     _conn.commit()
 
 
@@ -65,3 +75,49 @@ def is_chat_allowed(chat_id: int) -> bool:
 
 def all_chats() -> list[int]:
     return [r[0] for r in _conn.execute("SELECT chat_id FROM allowed_chats")]
+
+
+# --- Настройки чата (модель ИИ, интернет и т.п.) ---
+
+def get_setting(chat_id: int, key: str, default: str = "") -> str:
+    row = _conn.execute(
+        "SELECT value FROM settings WHERE chat_id = ? AND key = ?", (chat_id, key)
+    ).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(chat_id: int, key: str, value: str) -> None:
+    _conn.execute(
+        "INSERT OR REPLACE INTO settings (chat_id, key, value) VALUES (?, ?, ?)",
+        (chat_id, key, value),
+    )
+    _conn.commit()
+
+
+# --- Стиль Далера (примеры текстов для ИИ) ---
+
+def add_style(text: str) -> int:
+    _conn.execute("INSERT INTO style (text) VALUES (?)", (text,))
+    _conn.commit()
+    return style_count()
+
+
+def get_style(max_chars: int = 8000) -> str:
+    rows = [r[0] for r in _conn.execute("SELECT text FROM style ORDER BY id DESC")]
+    out: list[str] = []
+    total = 0
+    for t in rows:  # новые важнее; набираем, пока влезает
+        if total + len(t) > max_chars:
+            break
+        out.append(t)
+        total += len(t)
+    return "\n\n---\n\n".join(reversed(out))
+
+
+def style_count() -> int:
+    return _conn.execute("SELECT COUNT(*) FROM style").fetchone()[0]
+
+
+def clear_style() -> None:
+    _conn.execute("DELETE FROM style")
+    _conn.commit()

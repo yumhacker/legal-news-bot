@@ -23,6 +23,7 @@ from aiogram.types import (
     Message,
 )
 
+import ai
 import config
 import sources
 import storage
@@ -39,7 +40,15 @@ SOURCES = {
     "news": ("🗞 Новости МВД", sources.fetch_news),
     "procedures": ("📋 Процедуры МВД (נהלים)", sources.fetch_procedures),
     "laws": ("⚖️ Принятые законы Кнессета", sources.fetch_laws),
+    "court": ("👨‍⚖️ Решения судов (пресс-служба)", sources.fetch_court_decisions),
 }
+
+LAWYER_SYSTEM = (
+    "Ты — ассистент израильского адвоката Далера Юсупова "
+    "(иммиграционное право Израиля, статус, гражданство, процедуры МВД). "
+    "Отвечай по-русски, юридически аккуратно, без выдумок: если данных не "
+    "хватает или не уверен — прямо скажи. Иврит цитируй с переводом."
+)
 
 # --- Доступ: свои пользователи в личке ИЛИ в разрешённой группе ---
 
@@ -147,7 +156,17 @@ async def cmd_help(message: Message) -> None:
         else "выключен"
     )
     await message.answer(
-        "/start — меню с кнопками\n"
+        "/start — меню с кнопками (последние обновления)\n\n"
+        "🤖 ИИ:\n"
+        "/ai вопрос — спросить ИИ (или ответом на новость)\n"
+        "/post — ответь этим на новость → готовый пост; "
+        "<code>/post для инстаграма</code>\n"
+        "/idea тема — идеи постов и видео\n"
+        "/model — выбрать Claude/GPT и включить интернет-поиск\n\n"
+        "✍️ Стиль Далера:\n"
+        "/style_add — добавить пример текста (ответом или после команды)\n"
+        "/style — что сохранено · /style_clear — очистить (админ)\n\n"
+        "⚙️ Прочее:\n"
         "/id — показать свой Telegram ID и ID чата\n"
         "/allowchat — (админ, в группе) разрешить боту работать в группе\n"
         "/denychat — (админ, в группе) отключить группу\n\n"
@@ -186,6 +205,196 @@ async def on_source_button(cb: CallbackQuery) -> None:
                 f"({type(exc).__name__}). Попробуй позже."
             )
         await cb.message.answer(text, disable_web_page_preview=True)
+
+
+# ============================ ИИ-команды ============================
+
+def _arg(message: Message) -> str:
+    """Текст после команды."""
+    parts = (message.text or "").split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+def _material(message: Message) -> str:
+    """Текст сообщения, на которое ответили командой."""
+    r = message.reply_to_message
+    if not r:
+        return ""
+    try:
+        return r.html_text or r.text or r.caption or ""
+    except Exception:  # noqa: BLE001
+        return r.text or r.caption or ""
+
+def _style_block() -> str:
+    s = storage.get_style()
+    if not s:
+        return ""
+    return (
+        "\n\nНиже — информация о практике Далера и примеры его текстов. "
+        "Пиши посты, подражая этому стилю:\n" + s
+    )
+
+async def _run_ai(message: Message, user_prompt: str, use_style: bool) -> None:
+    chat_id = message.chat.id
+    model_key = storage.get_setting(chat_id, "model", ai.DEFAULT_MODEL_KEY)
+    if model_key not in ai.MODELS:
+        model_key = ai.DEFAULT_MODEL_KEY
+    online = storage.get_setting(chat_id, "web", "0") == "1"
+    system = LAWYER_SYSTEM + (_style_block() if use_style else "")
+    note = await message.answer(
+        f"⏳ {ai.MODELS[model_key][0]}{' 🌐' if online else ''} думает…"
+    )
+    try:
+        text = await ai.ask(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_prompt},
+            ],
+            model_key,
+            online,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Ошибка ИИ")
+        await note.edit_text(f"⚠️ Ошибка ИИ: {exc}")
+        return
+    try:
+        await note.delete()
+    except Exception:  # noqa: BLE001
+        pass
+    for i in range(0, len(text), 3800):
+        await message.answer(
+            text[i : i + 3800], parse_mode=None, disable_web_page_preview=True
+        )
+
+@main_router.message(Command("ai"))
+async def cmd_ai(message: Message) -> None:
+    q, mat = _arg(message), _material(message)
+    if not q and not mat:
+        await message.answer(
+            "Напиши вопрос после команды: <code>/ai твой вопрос</code>\n"
+            "Или ответь командой /ai на сообщение с новостью."
+        )
+        return
+    prompt = (f"Материал:\n{mat}\n\n" if mat else "") + (
+        q or "Прочитай материал и кратко объясни суть и значение для клиентов."
+    )
+    await _run_ai(message, prompt, use_style=False)
+
+@main_router.message(Command("post"))
+async def cmd_post(message: Message) -> None:
+    mat, spec = _material(message), _arg(message)
+    if not mat and not spec:
+        await message.answer(
+            "Как пользоваться:\n"
+            "• ответь командой /post на сообщение с новостью — напишу пост по ней;\n"
+            "• можно уточнить: <code>/post для инстаграма, коротко</code>\n"
+            "• или без reply: <code>/post тема поста</code>"
+        )
+        return
+    target = spec or "Telegram-канала"
+    prompt = (
+        (f"Материал (новость/решение/тема):\n{mat}\n\n" if mat else "")
+        + f"Задание: напиши пост для {target}. "
+        "Пиши на русском, в стиле Далера (если примеры приложены), с цепляющим "
+        "началом и практическим выводом для людей, которых это касается. "
+        "Если в материале есть ссылка и у тебя есть доступ в интернет — изучи её. "
+        "В конце уместен короткий дисклеймер, что пост не заменяет консультацию."
+    )
+    await _run_ai(message, prompt, use_style=True)
+
+@main_router.message(Command("idea"))
+async def cmd_idea(message: Message) -> None:
+    topic = _arg(message) or _material(message)
+    if not topic:
+        await message.answer("Укажи тему: <code>/idea выдворение и статус</code>")
+        return
+    prompt = (
+        f"Тема/материал:\n{topic}\n\n"
+        "Предложи 5 идей постов или коротких видео для соцсетей адвоката: "
+        "для каждой — рабочий заголовок и 2–3 тезиса. Идеи практичные, "
+        "из жизни клиентов (статус, МВД, суды), без воды."
+    )
+    await _run_ai(message, prompt, use_style=True)
+
+@main_router.message(Command("style"))
+async def cmd_style(message: Message) -> None:
+    n = storage.style_count()
+    s = storage.get_style(1500)
+    if not n:
+        await message.answer(
+            "Стиль пока пуст. Добавь примеры текстов Далера:\n"
+            "• ответь командой /style_add на сообщение с текстом поста,\n"
+            "• или <code>/style_add текст…</code>\n"
+            "Туда же можно добавить описание: какими делами занимается Далер."
+        )
+        return
+    await message.answer(
+        f"Сохранено фрагментов: {n}. Последние:\n\n{html.escape(s[-1500:])}",
+        parse_mode=None,
+    )
+
+@main_router.message(Command("style_add"))
+async def cmd_style_add(message: Message) -> None:
+    text = _arg(message) or _material(message)
+    if not text:
+        await message.answer(
+            "Ответь командой /style_add на сообщение с текстом "
+            "или напиши текст после команды."
+        )
+        return
+    n = storage.add_style(text)
+    await message.answer(f"✅ Добавлено в стиль. Всего фрагментов: {n}.")
+
+@main_router.message(Command("style_clear"))
+async def cmd_style_clear(message: Message) -> None:
+    if message.from_user.id != config.ADMIN_ID:
+        await message.answer("Очищать стиль может только админ.")
+        return
+    storage.clear_style()
+    await message.answer("Стиль очищен.")
+
+def _model_kb(chat_id: int) -> InlineKeyboardMarkup:
+    current = storage.get_setting(chat_id, "model", ai.DEFAULT_MODEL_KEY)
+    online = storage.get_setting(chat_id, "web", "0") == "1"
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=("✅ " if key == current else "") + label,
+                callback_data=f"mdl:{key}",
+            )
+        ]
+        for key, (label, _) in ai.MODELS.items()
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=f"🌐 Интернет-поиск: {'ВКЛ' if online else 'выкл'}",
+                callback_data="mdl:web",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+@main_router.message(Command("model"))
+async def cmd_model(message: Message) -> None:
+    await message.answer(
+        "Какая модель отвечает на /ai, /post, /idea в этом чате:",
+        reply_markup=_model_kb(message.chat.id),
+    )
+
+@main_router.callback_query(F.data.startswith("mdl:"))
+async def on_model_button(cb: CallbackQuery) -> None:
+    chat_id = cb.message.chat.id
+    val = cb.data.split(":", 1)[1]
+    if val == "web":
+        cur = storage.get_setting(chat_id, "web", "0") == "1"
+        storage.set_setting(chat_id, "web", "0" if cur else "1")
+    elif val in ai.MODELS:
+        storage.set_setting(chat_id, "model", val)
+    try:
+        await cb.message.edit_reply_markup(reply_markup=_model_kb(chat_id))
+    except Exception:  # noqa: BLE001
+        pass
+    await cb.answer("Сохранено")
 
 
 # ============================ Чужим — отказ ============================

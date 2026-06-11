@@ -4,6 +4,8 @@
 Каждый fetch_* возвращает список словарей:
     {"id": str, "title": str, "date": "ДД.ММ.ГГГГ", "extra": str, "url": str}
 """
+import urllib.parse
+
 import aiohttp
 
 import config
@@ -29,19 +31,35 @@ NEWS_URL = (
 POLICY_URL = "https://www.gov.il/he/api/PolicyApi/Index"
 KNESSET_BILLS_URL = "https://knesset.gov.il/Odata/ParliamentInfo.svc/KNS_Bill"
 
+# Пресс-служба судов (פסקי דין והחלטות שהופצו ע"י מערך הדוברות)
+COURT_URL = "https://www.gov.il/he/api/DynamicCollector"
+COURT_TEMPLATE_ID = "4ce99cd7-cb74-45ca-9e01-3fa4ce905dc8"
+COURT_PAGE = "https://www.gov.il/he/departments/dynamiccollectors/spokmanship_court"
+
 UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 
 
-async def _get_json(url: str, params: dict | None = None, headers: dict | None = None):
+async def _get_json(url: str, params=None, headers: dict | None = None):
     h = {"User-Agent": UA, "Accept": "application/json"}
     if headers:
         h.update(headers)
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(url, params=params, headers=h) as resp:
+            resp.raise_for_status()
+            return await resp.json(content_type=None)
+
+
+async def _post_json(url: str, payload: dict, headers: dict | None = None):
+    h = {"User-Agent": UA, "Accept": "application/json", "Referer": COURT_PAGE}
+    if headers:
+        h.update(headers)
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, headers=h) as resp:
             resp.raise_for_status()
             return await resp.json(content_type=None)
 
@@ -159,6 +177,44 @@ async def fetch_procedures(limit: int = 5) -> list[dict]:
                 "date": _iso_to_ru(updated),
                 "extra": ", ".join(x.get("UnitsDesc") or []),
                 "url": f"https://www.gov.il/he/pages/{url_name}" if url_name else "",
+            }
+        )
+    return out
+
+
+async def fetch_court_decisions(limit: int = 5) -> list[dict]:
+    """Решения судов, распространённые пресс-службой (вкл. Верховный суд)."""
+    data = await _post_json(
+        COURT_URL,
+        {
+            "DynamicTemplateID": COURT_TEMPLATE_ID,
+            "QueryFilters": {"skip": {"Query": 0}},
+            "From": 0,
+        },
+    )
+    out = []
+    for x in (data.get("Results") or [])[:limit]:
+        d = x.get("Data") or {}
+        files = d.get("file_name") or []
+        fname = (files[0] or {}).get("FileName", "") if files else ""
+        url_name = x.get("UrlName") or ""
+        if fname and url_name:
+            url = (
+                "https://www.gov.il/BlobFolder/dynamiccollectorresultitem/"
+                f"{url_name}/he/{urllib.parse.quote(fname)}"
+            )
+        else:
+            url = COURT_PAGE
+        extra = " · ".join(
+            z for z in (d.get("judge", ""), d.get("name_number", "")) if z
+        )
+        out.append(
+            {
+                "id": url_name or d.get("name_number", "") or d.get("title", "")[:50],
+                "title": d.get("title", "") or "(без названия)",
+                "date": _iso_to_ru(d.get("doc_create_date")),
+                "extra": extra,
+                "url": url,
             }
         )
     return out

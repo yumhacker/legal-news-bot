@@ -16,6 +16,9 @@ ALLOWED_USER_IDS = {
 if ADMIN_ID:
     ALLOWED_USER_IDS.add(ADMIN_ID)
 
+# --- OpenRouter (ИИ: Claude/GPT). Пусто — ИИ-команды отключены ---
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+
 # --- Email (дайджест). Если GMAIL_FROM/GMAIL_APP_PASSWORD пустые — email отключён ---
 EMAIL_TO = os.getenv("EMAIL_TO", "")
 GMAIL_FROM = os.getenv("GMAIL_FROM", "")

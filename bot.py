@@ -17,6 +17,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
+    ChatMemberUpdated,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -40,10 +41,37 @@ SOURCES = {
     "laws": ("⚖️ Принятые законы Кнессета", sources.fetch_laws),
 }
 
-# --- Роутеры: основной (только для своих) и «отказ» для всех остальных ---
+# --- Доступ: свои пользователи в личке ИЛИ в разрешённой группе ---
+
+def _chat_ok(chat) -> bool:
+    return chat.type == "private" or storage.is_chat_allowed(chat.id)
+
+
+def _msg_allowed(m: Message) -> bool:
+    return (
+        m.from_user is not None
+        and m.from_user.id in config.ALLOWED_USER_IDS
+        and _chat_ok(m.chat)
+    )
+
+
+def _cb_allowed(cb: CallbackQuery) -> bool:
+    return (
+        cb.from_user.id in config.ALLOWED_USER_IDS
+        and cb.message is not None
+        and _chat_ok(cb.message.chat)
+    )
+
+
+# admin_router — только команды управления группами (только Марина)
+admin_router = Router()
+admin_router.message.filter(
+    lambda m: m.from_user is not None and m.from_user.id == config.ADMIN_ID
+)
+
 main_router = Router()
-main_router.message.filter(F.from_user.id.in_(config.ALLOWED_USER_IDS))
-main_router.callback_query.filter(F.from_user.id.in_(config.ALLOWED_USER_IDS))
+main_router.message.filter(_msg_allowed)
+main_router.callback_query.filter(_cb_allowed)
 
 denied_router = Router()
 
@@ -71,6 +99,32 @@ def format_items(title: str, items: list[dict], header: str | None = None) -> st
     return "\n".join(lines)
 
 
+# ===================== Управление группами (только админ) =====================
+
+@admin_router.message(Command("allowchat"))
+async def cmd_allowchat(message: Message) -> None:
+    if message.chat.type == "private":
+        await message.answer(
+            "Эту команду нужно отправить В ГРУППЕ, которую хочешь подключить."
+        )
+        return
+    storage.add_chat(message.chat.id)
+    log.info("Группа разрешена: %s (%s)", message.chat.id, message.chat.title)
+    await message.answer(
+        "✅ Группа подключена. Теперь я отвечаю здесь тебе и Далеру "
+        "и буду присылать сюда новые обновления.\nОтключить: /denychat"
+    )
+
+
+@admin_router.message(Command("denychat"))
+async def cmd_denychat(message: Message) -> None:
+    if message.chat.type == "private":
+        await message.answer("Эту команду нужно отправить в группе.")
+        return
+    storage.remove_chat(message.chat.id)
+    await message.answer("Группа отключена. Вернуть: /allowchat")
+
+
 # ============================ Команды и кнопки ============================
 
 @main_router.message(CommandStart())
@@ -94,7 +148,9 @@ async def cmd_help(message: Message) -> None:
     )
     await message.answer(
         "/start — меню с кнопками\n"
-        "/id — показать свой Telegram ID\n\n"
+        "/id — показать свой Telegram ID и ID чата\n"
+        "/allowchat — (админ, в группе) разрешить боту работать в группе\n"
+        "/denychat — (админ, в группе) отключить группу\n\n"
         f"Автомониторинг: {watch}.\n"
         f"Email-уведомления: {'включены, ' + config.EMAIL_TO if email_enabled() else 'выключены'}.",
         reply_markup=main_kb(),
@@ -103,7 +159,10 @@ async def cmd_help(message: Message) -> None:
 
 @main_router.message(Command("id"))
 async def cmd_id(message: Message) -> None:
-    await message.answer(f"Твой Telegram ID: <code>{message.from_user.id}</code>")
+    await message.answer(
+        f"Твой Telegram ID: <code>{message.from_user.id}</code>\n"
+        f"ID этого чата: <code>{message.chat.id}</code>"
+    )
 
 
 @main_router.callback_query(F.data.startswith("src:"))
@@ -131,14 +190,36 @@ async def on_source_button(cb: CallbackQuery) -> None:
 
 # ============================ Чужим — отказ ============================
 
+@denied_router.my_chat_member()
+async def on_added_to_chat(event: ChatMemberUpdated) -> None:
+    """Бота добавили/изменили в каком-то чате."""
+    chat = event.chat
+    if chat.type == "private":
+        return
+    new_status = event.new_chat_member.status
+    if new_status in ("left", "kicked"):
+        storage.remove_chat(chat.id)
+        return
+    # Добавил кто-то чужой → сразу выходим. Свои — даём время на /allowchat.
+    if event.from_user and event.from_user.id in config.ALLOWED_USER_IDS:
+        log.info("Добавлена в чат %s (%s) своим — жду /allowchat", chat.id, chat.title)
+        return
+    if not storage.is_chat_allowed(chat.id):
+        log.warning("Чужой чат %s (%s) — выхожу", chat.id, chat.title)
+        await event.bot.leave_chat(chat.id)
+
+
 @denied_router.message()
 async def denied_message(message: Message) -> None:
-    log.warning(
-        "Отказ в доступе: id=%s username=%s",
-        message.from_user.id,
-        message.from_user.username,
-    )
-    await message.answer("⛔ Это закрытый бот.")
+    uid = message.from_user.id if message.from_user else "?"
+    if message.chat.type == "private":
+        log.warning("Отказ в доступе: id=%s", uid)
+        await message.answer("⛔ Это закрытый бот.")
+        return
+    # Группа: не разрешена → выходим; разрешена, но пишет чужой → молчим
+    if not storage.is_chat_allowed(message.chat.id):
+        log.warning("Сообщение из чужого чата %s — выхожу", message.chat.id)
+        await message.bot.leave_chat(message.chat.id)
 
 
 @denied_router.callback_query()
@@ -170,11 +251,12 @@ async def check_updates(bot: Bot) -> None:
             continue
 
         text = format_items(title, fresh, header=f"🔔 <b>{title}</b> — обновление!")
-        for user_id in config.ALLOWED_USER_IDS:
+        recipients = list(config.ALLOWED_USER_IDS) + storage.all_chats()
+        for chat_id in recipients:
             try:
-                await bot.send_message(user_id, text, disable_web_page_preview=True)
+                await bot.send_message(chat_id, text, disable_web_page_preview=True)
             except Exception:  # noqa: BLE001
-                log.exception("Не доставлено пользователю %s", user_id)
+                log.exception("Не доставлено в чат %s", chat_id)
         await asyncio.to_thread(send_email, f"Обновление: {title}", text)
 
 
@@ -202,6 +284,7 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+    dp.include_router(admin_router)
     dp.include_router(main_router)
     dp.include_router(denied_router)
     log.info("Бот запущен. Доступ: %s", sorted(config.ALLOWED_USER_IDS))

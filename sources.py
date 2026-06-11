@@ -82,17 +82,60 @@ async def fetch_news(limit: int = 5) -> list[dict]:
     return out
 
 
-async def fetch_procedures(limit: int = 5) -> list[dict]:
-    """Процедуры МВД (נהלים והנחיות), отсортированы по дате обновления."""
+def _parse_gateway_item(x: dict) -> dict:
+    """Разбор элемента из шлюза openapi-gc (DataCollector/GetResults)."""
+    meta = (x.get("tags") or {}).get("metaData") or {}
+
+    def first_title(key: str) -> str:
+        vals = meta.get(key) or []
+        return (vals[0] or {}).get("title", "") if vals else ""
+
+    url = x.get("url") or ""
+    if url and not url.startswith("http"):
+        url = "https://www.gov.il" + url
+    date = first_title("תאריך עדכון") or first_title("תאריך פרסום")
+    return {
+        "id": f"{url}:{date}",
+        "title": x.get("title", "") or "(без названия)",
+        "date": date,
+        "extra": first_title("נושא") or first_title("יחידות"),
+        "url": url,
+    }
+
+
+async def _fetch_procedures_gateway(limit: int) -> list[dict]:
+    """Запасной путь: процедуры через шлюз openapi-gc (www.gov.il может
+    отдавать 403 с серверных IP, шлюз — нет)."""
     data = await _get_json(
-        POLICY_URL,
+        NEWS_URL,
         params={
-            "OfficeId": OFFICE_ID,
+            "CollectorType": "policies",
+            "officeId": OFFICE_ID,
             "Type": POLICY_TYPE,
-            "limit": str(limit),
+            "culture": "he",
             "skip": "0",
         },
+        headers={"x-client-id": GOVIL_CLIENT_ID},
     )
+    return [_parse_gateway_item(x) for x in (data.get("results") or [])[:limit]]
+
+
+async def fetch_procedures(limit: int = 5) -> list[dict]:
+    """Процедуры МВД (נהלים והנחיות), отсортированы по дате обновления."""
+    try:
+        data = await _get_json(
+            POLICY_URL,
+            params={
+                "OfficeId": OFFICE_ID,
+                "Type": POLICY_TYPE,
+                "limit": str(limit),
+                "skip": "0",
+            },
+        )
+    except aiohttp.ClientResponseError as exc:
+        if exc.status in (403, 429, 503):
+            return await _fetch_procedures_gateway(limit)
+        raise
     out = []
     for x in (data.get("results") or [])[:limit]:
         updated = x.get("DocUpdateDate") or x.get("DocPublishedDate") or ""

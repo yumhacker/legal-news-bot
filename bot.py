@@ -10,6 +10,8 @@
 import asyncio
 import html
 import logging
+import os
+import tempfile
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -20,6 +22,7 @@ from aiogram.types import (
     BotCommandScopeDefault,
     CallbackQuery,
     ChatMemberUpdated,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -29,6 +32,7 @@ import ai
 import config
 import sources
 import storage
+import voice
 from notifier import email_enabled, send_email
 
 logging.basicConfig(
@@ -145,8 +149,9 @@ async def cmd_denychat(message: Message) -> None:
 @main_router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     hint = (
-        "\n\n💬 А ещё я помощник: просто напиши мне сообщение "
-        "(вопрос, текст новости, «набросай пост…») — отвечу без команд."
+        "\n\n💬 А ещё я помощник: просто напиши или наговори мне голосовое "
+        "(вопрос, текст новости, «набросай пост…») — отвечу без команд. "
+        "Под каждым ответом есть кнопка 🔊, чтобы услышать его голосом."
         if message.chat.type == "private"
         else "\n\n💬 Помощник в группе: /ai, /post, /idea."
     )
@@ -272,10 +277,26 @@ async def _run_ai(message: Message, user_prompt: str, use_style: bool) -> None:
         await note.delete()
     except Exception:  # noqa: BLE001
         pass
-    for i in range(0, len(text), 3800):
+    chunks = [text[i : i + 3800] for i in range(0, len(text), 3800)] or [text]
+    for idx, chunk in enumerate(chunks):
+        last = idx == len(chunks) - 1
         await message.answer(
-            text[i : i + 3800], parse_mode=None, disable_web_page_preview=True
+            chunk,
+            parse_mode=None,
+            disable_web_page_preview=True,
+            reply_markup=_voice_kb() if last and config.OPENROUTER_API_KEY else None,
         )
+
+
+def _voice_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔊 Озвучить (рус)", callback_data="say:ru"),
+                InlineKeyboardButton(text="🔊 עברית", callback_data="say:he"),
+            ]
+        ]
+    )
 
 @main_router.message(Command("ai"))
 async def cmd_ai(message: Message) -> None:
@@ -431,6 +452,54 @@ async def on_model_button(cb: CallbackQuery) -> None:
     except Exception:  # noqa: BLE001
         pass
     await cb.answer("Сохранено")
+
+
+# ===== Озвучка ответа по кнопке =====
+
+@main_router.callback_query(F.data.startswith("say:"))
+async def on_say(cb: CallbackQuery) -> None:
+    lang = cb.data.split(":", 1)[1]
+    text = (cb.message.text or cb.message.caption or "").strip()
+    if not text:
+        await cb.answer("Нечего озвучивать", show_alert=True)
+        return
+    await cb.answer("Озвучиваю…")
+    try:
+        ogg = await voice.synthesize(text, lang)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Ошибка озвучки")
+        await cb.message.answer(f"⚠️ Не удалось озвучить: {exc}")
+        return
+    try:
+        await cb.message.answer_voice(FSInputFile(ogg))
+    finally:
+        if os.path.exists(ogg):
+            os.remove(ogg)
+
+
+# ===== Голосовое на входе = распознать и ответить (только в личке) =====
+
+@main_router.message(F.chat.type == "private", F.voice)
+async def on_voice_message(message: Message) -> None:
+    note = await message.answer("🎙 Слушаю…")
+    fd, ogg_path = tempfile.mkstemp(suffix=".oga")
+    os.close(fd)
+    try:
+        tg_file = await message.bot.get_file(message.voice.file_id)
+        await message.bot.download_file(tg_file.file_path, destination=ogg_path)
+        text = await voice.transcribe_ogg(ogg_path)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Ошибка распознавания")
+        await note.edit_text(f"⚠️ Не удалось распознать голос: {exc}")
+        return
+    finally:
+        if os.path.exists(ogg_path):
+            os.remove(ogg_path)
+    if not text:
+        await note.edit_text("Не расслышал — попробуй сказать ещё раз.")
+        return
+    await note.edit_text(f"🎙 Распознал: <i>{html.escape(text)}</i>")
+    await _run_ai(message, text, use_style=False)
 
 
 # ===== Обычный текст в личке = разговор с помощником (без команд) =====

@@ -27,9 +27,9 @@ else
   echo "   swap уже есть"
 fi
 
-echo "-- Пакеты системы"
+echo "-- Пакеты системы (python3-venv + ffmpeg для голоса)"
 apt-get update -qq
-apt-get install -y -qq python3-venv >/dev/null
+apt-get install -y -qq python3-venv ffmpeg >/dev/null
 
 echo "-- Пользователь botuser"
 id -u botuser >/dev/null 2>&1 || useradd -r -m botuser
